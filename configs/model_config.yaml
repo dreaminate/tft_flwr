@@ -1,4 +1,4 @@
-data_path: data/merged/full_merged.csv
+data_path: D:/tft_FLWR/data/pkl_merged/full_merged.pkl
 resume_ckpt: checkpoints/last.ckpt
 warm_start_ckpt: checkpoints/best.ckpt
 
@@ -7,14 +7,14 @@ warm_start_ckpt: checkpoints/best.ckpt
 val_mode: ratio
 val_days: 14     # 若 val_mode = "days"
 val_ratio: 0.2   # 若 val_mode = "ratio"
-batch_size: 64
+batch_size: 16
 num_workers: 1
-hidden_size: 128
+hidden_size: 16
 lstm_layers: 1
-attention_head_size: 4
+attention_head_size: 1
 dropout: 0.2
 learning_rate: 7.59e-03
-max_epochs: 10
+max_epochs: 1
 precision: "16-mixed"
 grad_clip: 0.2
 accumulate: 2

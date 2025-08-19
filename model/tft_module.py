@@ -1,3 +1,4 @@
+import os
 import torch
 import math
 import torch.nn as nn
@@ -6,8 +7,16 @@ from lightning.pytorch import LightningModule
 from torch.optim.lr_scheduler import OneCycleLR
 from pytorch_forecasting.models import TemporalFusionTransformer
 import torchmetrics
+import matplotlib
+# ========= 关键：无GUI后端 + 关掉Qt =========
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+matplotlib.use("Agg")  # 一定要在 import pyplot 之前
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
+
+# 绘图开关：默认关闭；需要时 export FLWR_DISABLE_PLOTS=0
+PLOT_ENABLED = os.environ.get("FLWR_DISABLE_PLOTS", "1") == "0"
 
 
 # ============================================================
@@ -31,13 +40,9 @@ class HybridMultiLoss(nn.Module):
         self.loss_names = loss_names or [f"loss_{i}" for i in range(len(losses))]
 
     def forward(self, preds, targets, return_dict: bool = True):
-        """
-        preds / targets: list[T]，每个元素形状 [B]
-        """
         total_loss = 0.0
         details: dict[str, dict] = {}
 
-        # σ^2 = softplus(log_vars) 保证正；再加 clamp 避免过小
         sig2 = F.softplus(self.log_vars)
         sig2 = torch.clamp(sig2, min=1e-2)
         log_sig2 = torch.log(sig2 + 1e-8)
@@ -58,16 +63,6 @@ class HybridMultiLoss(nn.Module):
 # 2) LightningModule 封装 TFT
 # ============================================================
 class MyTFTModule(LightningModule):
-    """
-    集成：
-      - TemporalFusionTransformer 主模型
-      - 混合多目标损失
-      - 分类/回归指标
-      - OneCycleLR（按 step 更新）
-    约定：
-      - batch 的 y 为 (list_of_targets, None)，其中 list_of_targets 长度=T
-      - metrics_list: List[Tuple[str, torchmetrics.Metric]]，如 ("target_binarytrend_f1@1h", F1())
-    """
     def __init__(
         self,
         dataset,
@@ -88,7 +83,6 @@ class MyTFTModule(LightningModule):
     ):
         super().__init__()
 
-        # 保存重要超参
         self.save_hyperparameters({
             "learning_rate": learning_rate,
             "loss_schedule": loss_schedule or {},
@@ -98,8 +92,8 @@ class MyTFTModule(LightningModule):
             "steps_per_epoch": steps_per_epoch,
         })
         self.target_names = target_names or []
-        self.loss_schedule = loss_schedule or {}  
-        # —— 回归目标索引 & 统计表 —— #
+        self.loss_schedule = loss_schedule or {}
+
         self.regression_targets = [
             "target_logreturn",
             "target_logsharpe_ratio",
@@ -110,7 +104,6 @@ class MyTFTModule(LightningModule):
         self.reg_indices = [self.target_names.index(t) for t in self.regression_targets if t in self.target_names]
 
         if norm_pack is None:
-            # 兜底（不用标准化）
             self.register_buffer("means_tbl", torch.zeros(1, 1, len(self.regression_targets)), persistent=True)
             self.register_buffer("stds_tbl",  torch.ones(1, 1, len(self.regression_targets)),  persistent=True)
             self.sym2idx = {}
@@ -126,11 +119,9 @@ class MyTFTModule(LightningModule):
         # —— 构建 TFT —— #
         tft_kwargs.pop("loss", None)
         tft_kwargs.pop("output_size", None)
-        
         self.model = TemporalFusionTransformer.from_dataset(
             dataset, loss=None, output_size=output_size, **tft_kwargs
         )
-        # 抑制无效注意力
         for m in self.model.modules():
             if hasattr(m, "mask_bias"):
                 m.mask_bias = -1e4
@@ -138,8 +129,6 @@ class MyTFTModule(LightningModule):
         # —— 指标 —— #
         self.metrics_list = nn.ModuleList([m for _, m in metrics_list])
         self.metric_names = [n for n, _ in metrics_list]
-
-        # 每个指标对应的目标列索引
         self.metric_target_idx = [
             next(i for i, t in enumerate(self.target_names)
                  if n.split("@")[0].startswith(t + "_") or n.startswith(t + "_"))
@@ -152,11 +141,9 @@ class MyTFTModule(LightningModule):
             for name, is_cls in zip(self.metric_names, self.metric_is_cls) if is_cls
         })
 
-        # —— group 索引 —— #
         self.period_group_idx = dataset.group_ids.index("period")
         self.symbol_group_idx = dataset.group_ids.index("symbol")
 
-        # —— 周期映射 —— #
         if period_map is not None:
             self.period_map = period_map
         else:
@@ -164,7 +151,6 @@ class MyTFTModule(LightningModule):
             classes_ = getattr(enc, "classes_", None)
             self.period_map = {i: c for i, c in enumerate(classes_)} if classes_ is not None else {}
 
-        # —— close 索引：优先 encoder，其次 decoder —— #
         self.close_encoder_idx = None
         self.close_decoder_idx = None
         try:
@@ -179,50 +165,38 @@ class MyTFTModule(LightningModule):
                 self.close_decoder_idx = dec_reals.index("close")
         except Exception:
             pass
+
         self._build_loss(loss_list, weights, self.target_names)
+
     # -------------------- 小工具 --------------------
     def _batch_sym_per_idx(self, x):
-        g = x["groups"]  # [B, num_group_ids]
+        g = x["groups"]
         sym_idx = g[:, self.symbol_group_idx].long()
         per_idx = g[:, self.period_group_idx].long()
         return sym_idx, per_idx
+
     def _build_loss(self, loss_list, weights, target_names):
-        # 1) 统一为 ModuleList / Tensor
         assert isinstance(loss_list, (list, nn.ModuleList)) and len(loss_list) > 0, "loss_list 不能为空"
         losses = nn.ModuleList(loss_list)
-
         base_w = torch.as_tensor(weights, dtype=torch.float32).view(-1)
         assert base_w.numel() == len(losses), f"weights({base_w.numel()}) != losses({len(losses)})"
-
-        # 2) 可读的 loss 名称（与 target_names 对齐更容易看日志）
         if target_names and len(target_names) == len(losses):
             loss_names = [f"{t}_loss" for t in target_names]
         else:
             loss_names = [f"loss_{i}" for i in range(len(losses))]
+        self.loss_fn = HybridMultiLoss(losses=losses, base_weights=base_w, loss_names=loss_names)
 
-        # 3) 真正创建混合损失
-        self.loss_fn = HybridMultiLoss(
-            losses=losses,
-            base_weights=base_w,     # 会被 register_buffer 存成 self.loss_fn.w
-            loss_names=loss_names,
-        )
     def _standardize_y(self, y_enc, sym_idx, per_idx):
-        """
-        y_enc: [B, T] 原始目标；仅回归列标准化
-        """
         if not self.reg_indices or self.means_tbl.numel() <= 1:
             return y_enc
         y_std = y_enc.clone()
-        means_b = self.means_tbl[sym_idx, per_idx, :]  # [B, Tr]
+        means_b = self.means_tbl[sym_idx, per_idx, :]
         stds_b  = torch.clamp(self.stds_tbl[sym_idx, per_idx, :], min=1e-8)
         for local_t, global_t in enumerate(self.reg_indices):
             y_std[:, global_t] = (y_enc[:, global_t] - means_b[:, local_t]) / stds_b[:, local_t]
         return y_std
 
     def _destandardize_pred_and_true(self, preds_bt, y_enc, sym_idx, per_idx):
-        """
-        仅回归列反标准化；分类列原样返回
-        """
         if not self.reg_indices or self.means_tbl.numel() <= 1:
             return preds_bt, y_enc
         preds = preds_bt.clone()
@@ -244,13 +218,13 @@ class MyTFTModule(LightningModule):
         return obj
 
     def _stack_y(self, y_list, device=None):
-        cat = torch.cat([t.view(-1, 1).float() for t in y_list], dim=1)  # [B, T]
+        cat = torch.cat([t.view(-1, 1).float() for t in y_list], dim=1)
         return cat.to(device) if device else cat
 
     # -------------------- 前向 --------------------
     def forward(self, x):
         x = self._to_dev(x, self.device)
-        out = self.model(x)["prediction"]  # [B, T] or [B]
+        out = self.model(x)["prediction"]
         if isinstance(out, list):
             return [t.flatten() for t in out]
         if out.dim() == 1:
@@ -261,7 +235,6 @@ class MyTFTModule(LightningModule):
     def _shared_step(self, batch, stage):
         x, y = batch
 
-        # 输入 NaN/Inf 早检
         for name in ("encoder_cont", "decoder_cont"):
             if name in x:
                 ten = x[name]
@@ -269,14 +242,12 @@ class MyTFTModule(LightningModule):
                     raise RuntimeError(f"[{stage}] {name} has NaN/Inf")
 
         y_list = y[0] if isinstance(y, (list, tuple)) else [y]
-        y_enc = self._stack_y(y_list, self.device)       # [B, T]
-        pred_list = self.forward(x)                      # list[T]，每个 [B]
+        y_enc = self._stack_y(y_list, self.device)
+        pred_list = self.forward(x)
 
-        # 标准化目标（仅回归列）
         sym_idx, per_idx = self._batch_sym_per_idx(x)
         y_for_loss = self._standardize_y(y_enc, sym_idx, per_idx)
 
-        # —— Loss —— #
         weighted_total, sub_losses = self.loss_fn(
             pred_list,
             [y_for_loss[:, i] for i in range(y_for_loss.size(1))],
@@ -286,18 +257,21 @@ class MyTFTModule(LightningModule):
         w = self.loss_fn.w.to(raws)
         raw_total = (raws * w).sum()
 
-        self.log(f"{stage}_loss_raw", raw_total, on_step=True, on_epoch=True,
-                 prog_bar=True, batch_size=y_enc.size(0))
-        self.log(f"{stage}_loss", weighted_total, on_step=True, on_epoch=True,
-                 prog_bar=True, batch_size=y_enc.size(0))
+        # 1) 总损失
+        self.log(f"{stage}_loss_raw", raw_total,
+                on_step=False, on_epoch=True, prog_bar=False, batch_size=y_enc.size(0))
 
+        self.log(f"{stage}_loss", weighted_total,
+                on_step=False, on_epoch=True, prog_bar=False, batch_size=y_enc.size(0))
+
+        # 2) 各子损失
         for name, item in sub_losses.items():
             self.log(f"{stage}/{name}_raw", item["raw"],
-                     on_step=True, on_epoch=True, batch_size=y_enc.size(0))
+                    on_step=False, on_epoch=True, prog_bar=False, batch_size=y_enc.size(0))
             self.log(f"{stage}/{name}_w", item["weighted"],
-                     on_step=True, on_epoch=True, batch_size=y_enc.size(0))
+                    on_step=False, on_epoch=True, prog_bar=False, batch_size=y_enc.size(0))
 
-        preds_bt = torch.stack(pred_list, dim=1)  # [B, T]
+        preds_bt = torch.stack(pred_list, dim=1)
         return weighted_total, preds_bt, y_enc, x, sym_idx, per_idx
 
     # -------------------- 训练/验证 --------------------
@@ -307,11 +281,8 @@ class MyTFTModule(LightningModule):
 
     def validation_step(self, batch, batch_idx):
         total, preds, y_enc, x, sym_idx, per_idx = self._shared_step(batch, "val")
-
-        # 回归指标在“原尺度”上评估
         preds_eval, y_eval = self._destandardize_pred_and_true(preds, y_enc, sym_idx, per_idx)
 
-        # —— 按 period 计算指标 —— #
         period_idx = x["groups"][:, self.period_group_idx].to(self.device)
         for idx, metric in enumerate(self.metrics_list):
             name = self.metric_names[idx]
@@ -325,7 +296,7 @@ class MyTFTModule(LightningModule):
 
             col = self.metric_target_idx[idx]
             if self.metric_is_cls[idx]:
-                prob = torch.sigmoid(preds[mask, col])  # 分类用原 logits 过 sigmoid
+                prob = torch.sigmoid(preds[mask, col])
                 t = y_enc[mask, col].float().clamp(0, 1).int()
                 metric.update(prob, t)
                 if name in self.confmats:
@@ -348,6 +319,12 @@ class MyTFTModule(LightningModule):
             metric.reset()
 
         # —— 混淆矩阵（若有分类指标）—— #
+        if not PLOT_ENABLED or not hasattr(self.logger, "experiment"):
+            # 默认不画，直接清空状态
+            for cm in self.confmats.values():
+                cm.reset()
+            return
+
         for tag, cm in self.confmats.items():
             try:
                 cm_val = cm.compute().cpu().numpy()
@@ -357,8 +334,7 @@ class MyTFTModule(LightningModule):
             if cm_val.size:
                 fig, ax = plt.subplots(figsize=(3, 3))
                 ConfusionMatrixDisplay(cm_val, display_labels=[0, 1]).plot(ax=ax, colorbar=False)
-                if hasattr(self.logger, "experiment"):
-                    self.logger.experiment.add_figure(f"val/confmat_{tag}", fig, self.current_epoch)
+                self.logger.experiment.add_figure(f"val/confmat_{tag}", fig, self.current_epoch)
                 plt.close(fig)
             cm.reset()
 
@@ -372,7 +348,7 @@ class MyTFTModule(LightningModule):
             )
             self.loss_fn.w.copy_(new.view_as(self.loss_fn.w))
 
-    # -------------------- 预测：标准化/原尺度/反log/未来价 --------------------
+    # -------------------- 预测 --------------------
     def predict_step(
         self,
         batch,
@@ -382,33 +358,20 @@ class MyTFTModule(LightningModule):
         with_antilog: bool = True,
         with_future_price: bool = True,
     ):
-        """
-        返回 dict：
-          - preds_std: 标准化空间 [B, T]
-          - preds_orig: 反标准化后的原尺度 [B, T]
-          - preds_antilog: 对 log 目标（如 target_logreturn）做 expm1，其它列 NaN [B, T]
-          - future_price: 若能拿到基价 close，则 future_close = close * exp(logreturn_pred)
-        """
         x, _ = batch
-
-        # 1) 标准化空间的预测
-        pred_list = self.forward(x)                         # list[T]，[B]
-        preds_bt = torch.stack(pred_list, dim=1).float()    # [B, T]
-        preds_bt = preds_bt.contiguous()
-
+        pred_list = self.forward(x)
+        preds_bt = torch.stack(pred_list, dim=1).float().contiguous()
         out = {"preds_std": preds_bt}
 
         if return_standardized:
             out.update({"preds_orig": None, "preds_antilog": None, "future_price": None})
             return out
 
-        # 2) 反标准化到原尺度（仅回归列）
         sym_idx, per_idx = self._batch_sym_per_idx(x)
         preds_orig, _ = self._destandardize_pred_and_true(preds_bt, preds_bt, sym_idx, per_idx)
         preds_orig = preds_orig.contiguous()
         out["preds_orig"] = preds_orig
 
-        # 3) 反 log（只对“log 目标”生效）
         preds_antilog = torch.full_like(preds_orig, float("nan"))
         future_price = None
 
@@ -423,13 +386,11 @@ class MyTFTModule(LightningModule):
 
                 if with_future_price:
                     base_close = None
-                    # 优先：encoder 最后一根 close
                     if self.close_encoder_idx is not None and "encoder_cont" in x:
                         try:
                             base_close = x["encoder_cont"][:, -1, self.close_encoder_idx]
                         except Exception:
                             base_close = None
-                    # 其次：decoder 第一步 close（你如果把 close 放进了 decoder）
                     if base_close is None and self.close_decoder_idx is not None and "decoder_cont" in x:
                         try:
                             base_close = x["decoder_cont"][:, 0, self.close_decoder_idx]
@@ -444,12 +405,10 @@ class MyTFTModule(LightningModule):
 
     # -------------------- 优化器/调度器 --------------------
     def configure_optimizers(self):
-    
         opt = torch.optim.Adam(self.parameters(), lr=float(self.hparams.learning_rate))
 
         spe = self.hparams.get("steps_per_epoch", None)
         if isinstance(spe, (int, float)) and math.isfinite(spe) and spe > 0:
-            # ✅ 有 steps_per_epoch：用 epochs + steps_per_epoch（最稳）
             sched = OneCycleLR(
                 opt,
                 max_lr=float(self.hparams.learning_rate),
@@ -461,7 +420,6 @@ class MyTFTModule(LightningModule):
                 final_div_factor=float(self.hparams.final_div_factor),
             )
         else:
-            # ❗兜底：算一个有限的 total_steps
             nb = getattr(self.trainer, "num_training_batches", None)
             acc = int(getattr(self.trainer, "accumulate_grad_batches", 1)) or 1
             max_epochs = int(getattr(self.trainer, "max_epochs", 1)) or 1

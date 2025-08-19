@@ -28,21 +28,19 @@ serverapp = "server_app:app"
 clientapp = "client_app:app"
 
 [tool.flwr.app.config]
-num-server-rounds = 3
-fraction-fit = 1.0
-fraction-evaluate = 1.0
-min-available-clients = 2
+num-server-rounds = 2
+fraction-fit = 0.5            # 2 个里抽 1 个
+fraction-evaluate = 0.5
+min-fit-clients = 1           # ← 关键：至少取 1 个
+min-evaluate-clients = 1
+min-available-clients = 1
 local-epochs = 1
 batch-size = 16
 num-workers = 1
 
-[tool.flwr.federations]
-default = "local-simulation"
-
 [tool.flwr.federations.local-simulation]
-# 新写法（部分版本识别）
-num-supernodes = 4
+num-supernodes = 2
 backend.name = "multiprocessing"
-# 兼容老写法（部分版本识别）
-options.num-supernodes = 4
+options.num-supernodes = 2
 options.backend.name = "multiprocessing"
+

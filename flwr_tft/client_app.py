@@ -5,7 +5,11 @@ import re
 import torch
 from flwr.client import NumPyClient, ClientApp
 from flwr.common import Context
-
+import os
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+print("[BOOT] CVD=", os.environ.get("CUDA_VISIBLE_DEVICES"))
 from task import (
     build_model_and_data,
     get_weights, set_weights,
@@ -29,16 +33,15 @@ class TFTClient(NumPyClient):
     def __init__(self, partition_id: int, run_cfg: Dict[str, Any]):
         self.partition_id = partition_id
         self.local_epochs = int(run_cfg.get("local-epochs", 1))
-        self.batch_size = int(run_cfg.get("batch-size", 256))
-        self.num_workers = int(run_cfg.get("num-workers", 4))
+        self.batch_size = int(run_cfg.get("batch-size", 16))
+        self.num_workers = int(run_cfg.get("num-workers", 1))
 
         self.model, self.train_loader, self.val_loader = build_model_and_data(
             partition_id=self.partition_id,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
         )
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.model.to(self.device)
+        
 
     # --- Flower NumPyClient API ---
     def get_parameters(self, config):

@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Dict, Any, List
 import sys, os, yaml, torch, numpy as np
 import lightning.pytorch as pl
-
+from lightning.pytorch.callbacks import TQDMProgressBar  
+import os
+os.environ.setdefault("RICH_FORCE_TERMINAL", "1")  # 强制按终端渲染
+os.environ.setdefault("RICH_NO_COLOR", "1")       # 可选：去掉颜色，日志更干净
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils.loss_factory import get_losses_by_targets
@@ -17,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 print(f"[FL] task.py loaded from: {Path(__file__).resolve()}")
-
+print("[BOOT] CVD=", os.environ.get("CUDA_VISIBLE_DEVICES"))
 # ==== 导入你项目内模块 ====
 from model.tft_module import MyTFTModule
 from data.load_dataset import get_dataloaders
@@ -38,6 +41,10 @@ def set_weights(module: torch.nn.Module, ndarrays: List["np.ndarray"]) -> None:
 # ==== 配置 ====
 DEFAULT_CFG = PROJECT_ROOT / "configs" / "model_config.yaml"
 WEIGHTS_CFG = PROJECT_ROOT / "configs" / "weights_config.yaml"
+print("[CLIENT] CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"))
+import torch
+print("[CLIENT] cuda.is_available =", torch.cuda.is_available(),
+      "| count =", torch.cuda.device_count())
 def load_yaml(path: str | Path) -> Dict[str, Any]:
     p = Path(path)
     if p.exists():
@@ -142,7 +149,26 @@ def build_model_and_data(
 
 # ==== 本地训练/验证 ====
 def local_train_validate(model: pl.LightningModule, train_loader, val_loader, local_epochs: int = 1) -> Dict[str, float]:
-    trainer = pl.Trainer(accelerator="auto", devices=1, max_epochs=local_epochs, enable_checkpointing=False, logger=False, log_every_n_steps=50)
+    use_bar = os.environ.get("FLWR_PROGRESS", "tqdm").lower()  # 可选: tqdm / none
+    callbacks = []
+    enable_bar = True
+    if use_bar == "tqdm":
+        callbacks = [TQDMProgressBar(refresh_rate=200)]   # 覆盖刷新，不刷屏
+    elif use_bar == "none":
+        enable_bar = False
+        callbacks = []
+
+    trainer = pl.Trainer(
+    accelerator="gpu" if torch.cuda.is_available() else "cpu",
+    devices=1,
+    max_epochs=local_epochs,
+    logger=False,
+    enable_checkpointing=False,
+    enable_progress_bar=enable_bar,
+    callbacks=callbacks,
+    num_sanity_val_steps=0,   # 关键：跳过 sanity check，规避 rich 的钩子
+    log_every_n_steps=50,
+)
     trainer.fit(model, train_loader, val_loader)
     metrics = trainer.callback_metrics
     out: Dict[str, float] = {}
