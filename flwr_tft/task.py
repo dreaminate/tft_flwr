@@ -7,6 +7,11 @@ from typing import Dict, Any, List
 import sys, os, yaml, torch, numpy as np
 import pytorch_lightning as pl
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from utils.loss_factory import get_losses_by_targets
+from utils.metric_factory import get_metrics_by_targets
+
 # ==== 路径注入：确保能 import 到 D:\tft_module ====
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -32,7 +37,7 @@ def set_weights(module: torch.nn.Module, ndarrays: List["np.ndarray"]) -> None:
 
 # ==== 配置 ====
 DEFAULT_CFG = PROJECT_ROOT / "configs" / "model_config.yaml"
-
+WEIGHTS_CFG = PROJECT_ROOT / "configs" / "weights_config.yaml"
 def load_yaml(path: str | Path) -> Dict[str, Any]:
     p = Path(path)
     if p.exists():
@@ -99,12 +104,38 @@ def build_model_and_data(
         focus_symbol=symbol,     # 若实现未使用，会被 **kwargs 忽略
         focus_period=period,
     )
-    train_loader, val_loader = _take_two_loaders(ret)
+    if not isinstance(ret, (list, tuple)) or len(ret) < 6:
+        raise RuntimeError("get_dataloaders 需要返回 (train_loader, val_loader, targets, train_ds, periods, norm_pack)")
+    train_loader, val_loader, target_names, train_ds, periods, norm_pack = ret[:6]
 
-    try:
-        model = MyTFTModule(cfg)
-    except TypeError:
-        model = MyTFTModule()
+    weight_cfg = load_yaml(WEIGHTS_CFG)
+    weights = weight_cfg.get("custom_weights", [1.0] * len(target_names))
+
+    enc = train_ds.categorical_encoders.get("period", None)
+    classes_ = getattr(enc, "classes_", None)
+    period_map = {i: c for i, c in enumerate(classes_)} if classes_ is not None else {i: p for i, p in enumerate(periods)}
+
+    steps_per_epoch = len(train_loader)
+    accum = int(cfg.get("accumulate", 1)) or 1
+    steps_per_epoch_eff = max(1, steps_per_epoch // accum)
+
+    model = MyTFTModule(
+        dataset=train_ds,
+        loss_list=get_losses_by_targets(target_names),
+        weights=weights,
+        output_size=[1] * len(target_names),
+        metrics_list=get_metrics_by_targets(target_names, periods),
+        target_names=target_names,
+        period_map=period_map,
+        learning_rate=cfg.get("learning_rate", 1e-3),
+        loss_schedule=cfg.get("loss_schedule", {}),
+        norm_pack=norm_pack,
+        steps_per_epoch=steps_per_epoch_eff,
+        hidden_size=cfg.get("hidden_size"),
+        lstm_layers=cfg.get("lstm_layers"),
+        attention_head_size=cfg.get("attention_head_size"),
+        dropout=cfg.get("dropout"),
+    )
 
     print(f"[FL] partition={partition_id} -> ({symbol},{period}) | data_path={data_path} | bs={bs} nw={nw}")
     return model, train_loader, val_loader
