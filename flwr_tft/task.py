@@ -5,7 +5,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Any, List
 import sys, os, yaml, torch, numpy as np
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 

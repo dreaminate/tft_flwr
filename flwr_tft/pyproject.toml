@@ -33,8 +33,8 @@ fraction-fit = 1.0
 fraction-evaluate = 1.0
 min-available-clients = 2
 local-epochs = 1
-batch-size = 256
-num-workers = 4
+batch-size = 16
+num-workers = 1
 
 [tool.flwr.federations]
 default = "local-simulation"
