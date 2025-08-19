@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 *.so
-
+# Python build artifacts
+*.egg-info/
 # 忽略 Jupyter Notebook 的检查点
 .ipynb_checkpoints/
 
