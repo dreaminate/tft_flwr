@@ -1,0 +1,6 @@
+flwr>=1.19.0
+pytorch-lightning>=2.2.0
+torch
+pytorch-forecasting
+pyyaml
+omegaconf
