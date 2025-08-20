@@ -1,7 +1,7 @@
 # server_app.py
 from __future__ import annotations
 from typing import Dict, Any
-
+import re
 from flwr.server import ServerApp, ServerAppComponents
 from flwr.common import Context, ndarrays_to_parameters
 from flwr.server.strategy import FedAvg
@@ -13,7 +13,21 @@ except Exception:  # pragma: no cover
     from flwr.server.server import ServerConfig  # 旧版
 
 from task import build_model_and_data, get_weights
+class SecureAggregationStrategy(FedAvg):
+    """FedAvg strategy which informs clients of participants for masking."""
 
+    @staticmethod
+    def _infer_pid(cid: str) -> int:
+        m = re.search(r"(\d+)$", str(cid))
+        return int(m.group(1)) if m else 0
+
+    def configure_fit(self, server_round, parameters, client_manager):
+        cfg = super().configure_fit(server_round, parameters, client_manager)
+        pids = [self._infer_pid(client_proxy.cid) for client_proxy, _ in cfg]
+        pids_str = ",".join(str(pid) for pid in pids)
+        for _, fit_ins in cfg:
+            fit_ins.config["participant_ids"] = pids_str
+        return cfg
 
 def server_fn(context: Context) -> ServerAppComponents:
     run_cfg: Dict[str, Any] = context.run_config
@@ -27,13 +41,13 @@ def server_fn(context: Context) -> ServerAppComponents:
     init_model, _, _ = build_model_and_data(partition_id=0)
     init_params = ndarrays_to_parameters(get_weights(init_model))
 
-    strategy = FedAvg(
+    strategy = SecureAggregationStrategy(
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_evaluate,
         min_available_clients=min_available,
         min_fit_clients=min_fit_clients,
         initial_parameters=init_params,
-        min_evaluate_clients=min_evaluate_clients,      
+     min_evaluate_clients=min_evaluate_clients,
     )
     cfg = ServerConfig(num_rounds=num_rounds)
     return ServerAppComponents(strategy=strategy, config=cfg)
