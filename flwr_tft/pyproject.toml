@@ -37,7 +37,13 @@ min-available-clients = 1
 local-epochs = 1
 batch-size = 16
 num-workers = 1
-
+# Simulation options
+p-drop = 0.0
+max-latency = 0.0
+latency-jitter = 0.0
+bandwidth-limit = 0.0
+client-version = "1"
+expected-version = "1"
 [tool.flwr.federations.local-simulation]
 num-supernodes = 2
 backend.name = "multiprocessing"

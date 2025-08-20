@@ -1,9 +1,9 @@
 # server_app.py
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 import re
 from flwr.server import ServerApp, ServerAppComponents
-from flwr.common import Context, ndarrays_to_parameters
+from flwr.common import Context, ndarrays_to_parameters, parameters_to_ndarrays
 from flwr.server.strategy import FedAvg
 
 # 兼容不同 Flower 版本的 ServerConfig 位置
@@ -28,6 +28,46 @@ class SecureAggregationStrategy(FedAvg):
         for _, fit_ins in cfg:
             fit_ins.config["participant_ids"] = pids_str
         return cfg
+class DetailedLoggingStrategy(SecureAggregationStrategy):
+    """Strategy which prints rich information for each round."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._current_clients: List[str] = []
+
+    def configure_fit(self, server_round, parameters, client_manager):  # type: ignore[override]
+        cfg = super().configure_fit(server_round, parameters, client_manager)
+        self._current_clients = [client.cid for client, _ in cfg]
+        print(f"[ROUND {server_round}] selected clients: {self._current_clients}")
+        return cfg
+
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[Any, Any]],
+        failures: List[Tuple[Any, BaseException]],
+    ):  # type: ignore[override]
+        sample_info = []
+        responded = []
+        for client, fit_res in results:
+            params = parameters_to_ndarrays(fit_res.parameters)
+            payload = int(sum(p.nbytes for p in params))
+            sample_info.append(
+                {
+                    "cid": client.cid,
+                    "examples": fit_res.num_examples,
+                    "payload": payload,
+                }
+            )
+            responded.append(client.cid)
+        failed_ids = [client.cid for client, _ in failures]
+        dropped = list(set(self._current_clients) - set(responded) - set(failed_ids))
+        timeout_cnt = sum(isinstance(err, TimeoutError) for _, err in failures)
+        print(
+            f"[ROUND {server_round}] samples: {sample_info}, failures: {failed_ids}, ",
+            f"dropped: {dropped}, timeouts: {timeout_cnt}",
+        )
+        return super().aggregate_fit(server_round, results, failures)
 
 def server_fn(context: Context) -> ServerAppComponents:
     run_cfg: Dict[str, Any] = context.run_config
@@ -41,7 +81,7 @@ def server_fn(context: Context) -> ServerAppComponents:
     init_model, _, _ = build_model_and_data(partition_id=0)
     init_params = ndarrays_to_parameters(get_weights(init_model))
 
-    strategy = SecureAggregationStrategy(
+    strategy = DetailedLoggingStrategy(
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_evaluate,
         min_available_clients=min_available,

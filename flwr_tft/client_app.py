@@ -2,6 +2,8 @@
 from __future__ import annotations
 from typing import Dict, Any,List
 import re
+import random
+import time
 import hashlib
 import numpy as np
 import torch
@@ -67,7 +69,13 @@ class TFTClient(NumPyClient):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
         )
-        
+        # Simulation knobs
+        self.drop_rate = float(run_cfg.get("p-drop", 0.0))
+        self.latency = float(run_cfg.get("max-latency", 0.0))
+        self.jitter = float(run_cfg.get("latency-jitter", 0.0))
+        self.bandwidth = float(run_cfg.get("bandwidth-limit", 0.0))
+        self.version = str(run_cfg.get("client-version", "1"))
+        self.expected_version = str(run_cfg.get("expected-version", self.version))
 
     # --- Flower NumPyClient API ---
     def get_parameters(self, config):
@@ -84,15 +92,32 @@ class TFTClient(NumPyClient):
         if part_ids_str:
             part_ids = [int(p) for p in part_ids_str.split(",") if p]
             params = _pairwise_masks(self.partition_id, part_ids, params)
+                    # version check
+        if self.version != self.expected_version:
+            print(
+                f"[WARN] version mismatch: expected {self.expected_version} got {self.version}"
+            )
+
+        payload_bytes = sum(p.nbytes for p in params)
+        self._simulate_network(payload_bytes)
         return params, num_examples, metrics
 
     def evaluate(self, parameters, config):
         set_weights(self.model, parameters)
+        self._simulate_network()
         results = local_validate(self.model, self.val_loader)
         loss = float(results.get("val_loss", 0.0))
         num_examples = len(getattr(self.val_loader, "dataset", []))
         return loss, num_examples, results
-
+    # --- Simulation helpers -------------------------------------------------
+    def _simulate_network(self, payload: int = 0) -> None:
+        if random.random() < self.drop_rate:
+            raise RuntimeError("simulated random disconnect")
+        delay = self.latency + random.uniform(0, self.jitter)
+        if delay > 0:
+            time.sleep(delay)
+        if self.bandwidth > 0 and payload > 0:
+            time.sleep(payload / self.bandwidth)
 
 def client_fn(context: Context):
     partition_id = _infer_partition_id(context)
