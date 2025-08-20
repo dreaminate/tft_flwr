@@ -60,9 +60,20 @@ class DetailedLoggingStrategy(SecureAggregationStrategy):
                 }
             )
             responded.append(client.cid)
-        failed_ids = [client.cid for client, _ in failures]
-        dropped = list(set(self._current_clients) - set(responded) - set(failed_ids))
-        timeout_cnt = sum(isinstance(err, TimeoutError) for _, err in failures)
+        # ``failures`` can contain bare exceptions or ``(client, exc)`` tuples
+        failed_ids = []
+        timeout_cnt = 0
+        for failure in failures:
+            if isinstance(failure, tuple):
+                client, err = failure
+                failed_ids.append(client.cid)
+            else:
+                err = failure
+            if isinstance(err, TimeoutError):
+                timeout_cnt += 1
+        dropped = list(
+            set(self._current_clients) - set(responded) - set(failed_ids)
+        )
         print(
             f"[ROUND {server_round}] samples: {sample_info}, failures: {failed_ids}, ",
             f"dropped: {dropped}, timeouts: {timeout_cnt}",
