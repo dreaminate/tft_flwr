@@ -167,7 +167,7 @@ def local_train_validate(model: pl.LightningModule, train_loader, val_loader, lo
     enable_progress_bar=enable_bar,
     callbacks=callbacks,
     num_sanity_val_steps=0,   # 关键：跳过 sanity check，规避 rich 的钩子
-    log_every_n_steps=50,
+    log_every_n_steps=200   
 )
     trainer.fit(model, train_loader, val_loader)
     metrics = trainer.callback_metrics
@@ -182,6 +182,24 @@ def local_train_validate(model: pl.LightningModule, train_loader, val_loader, lo
     return out
 
 def local_validate(model: pl.LightningModule, val_loader) -> Dict[str, float]:
-    trainer = pl.Trainer(accelerator="auto", devices=1, enable_checkpointing=False, logger=False)
+    use_bar = os.environ.get("FLWR_PROGRESS", "tqdm").lower()  # 可选: tqdm / none
+    callbacks = []
+    enable_bar = True
+    if use_bar == "tqdm":
+        callbacks = [TQDMProgressBar(refresh_rate=200)]   # 覆盖刷新，不刷屏
+    elif use_bar == "none":
+        enable_bar = False
+        callbacks = []
+    trainer =pl.Trainer(
+    accelerator="gpu" if torch.cuda.is_available() else "cpu",
+    devices=1,
+    logger=False,
+    enable_checkpointing=False,
+    enable_progress_bar=enable_bar,
+    callbacks=callbacks,
+    num_sanity_val_steps=0,   # 关键：跳过 sanity check，规避 rich 的钩子
+    log_every_n_steps=200
+)
     results = trainer.validate(model, dataloaders=val_loader, verbose=False)
     return {k: float(v) for k, v in (results[0] if results else {}).items()}
+#              flwr run . local-simulation --run-config "num-server-rounds=3 local-epochs=1" --stream
