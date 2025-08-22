@@ -14,7 +14,7 @@ lstm_layers: 1
 attention_head_size: 1
 dropout: 0.2
 learning_rate: 7.59e-03
-max_epochs: 1
+max_epochs: 3
 precision: "16-mixed"
 grad_clip: 0.2
 accumulate: 2

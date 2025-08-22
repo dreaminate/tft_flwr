@@ -1,6 +1,8 @@
 import os
 import torch
+
 import math
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import torch.nn as nn
 import torch.nn.functional as F
 from lightning.pytorch import LightningModule
@@ -405,41 +407,55 @@ class MyTFTModule(LightningModule):
 
     # -------------------- 优化器/调度器 --------------------
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=float(self.hparams.learning_rate))
+        lr = float(self.hparams.learning_rate)
+        opt = torch.optim.Adam(self.parameters(), lr=lr)
 
-        spe = self.hparams.get("steps_per_epoch", None)
-        if isinstance(spe, (int, float)) and math.isfinite(spe) and spe > 0:
-            sched = OneCycleLR(
+        # 训练总 epoch，由 Trainer 控制
+        max_epochs = int(getattr(self.trainer, "max_epochs", 1)) or 1
+
+        # ---- 可选：warmup 超参数（不设就默认无/轻微预热）----
+        warmup_epochs = int(self.hparams.get("warmup_epochs", 0))
+        warmup_epochs = max(0, min(warmup_epochs, max_epochs - 1))  # 防越界
+        warmup_start_factor = float(self.hparams.get("warmup_start_factor", 0.1))  # (0,1]
+
+        # 余弦最低学习率：支持两种写法，优先 min_lr；否则用 final_div_factor 推出
+        eta_min = float(self.hparams.get(
+            "min_lr",
+            lr / float(self.hparams.get("final_div_factor", 100.0))
+        ))
+
+        schedulers = []
+        milestones = []
+
+        if warmup_epochs > 0:
+            # 线性预热：从 start_factor*lr -> lr，持续 warmup_epochs 个 epoch
+            warmup = LinearLR(
                 opt,
-                max_lr=float(self.hparams.learning_rate),
-                epochs=int(self.trainer.max_epochs),
-                steps_per_epoch=int(spe),
-                pct_start=float(self.hparams.pct_start),
-                anneal_strategy="cos",
-                div_factor=float(self.hparams.div_factor),
-                final_div_factor=float(self.hparams.final_div_factor),
+                start_factor=warmup_start_factor,
+                total_iters=warmup_epochs
             )
-        else:
-            nb = getattr(self.trainer, "num_training_batches", None)
-            acc = int(getattr(self.trainer, "accumulate_grad_batches", 1)) or 1
-            max_epochs = int(getattr(self.trainer, "max_epochs", 1)) or 1
+            schedulers.append(warmup)
+            milestones.append(warmup_epochs)
 
-            if isinstance(nb, (int, float)) and math.isfinite(nb) and nb > 0:
-                total_steps = max(1, (int(nb) // acc) * max_epochs)
-            else:
-                total_steps = int(getattr(self.trainer, "max_steps", 0)) \
-                            or int(getattr(self.trainer, "estimated_stepping_batches", 0)) \
-                            or 1000
-                total_steps = max(1, int(total_steps) // acc)
+        # 余弦退火覆盖剩余 epoch（至少 1 个）
+        cosine_epochs = max(1, max_epochs - warmup_epochs)
+        cosine = CosineAnnealingLR(
+            opt,
+            T_max=cosine_epochs,
+            eta_min=eta_min
+        )
+        schedulers.append(cosine)
 
-            sched = OneCycleLR(
-                opt,
-                max_lr=float(self.hparams.learning_rate),
-                total_steps=int(total_steps),
-                pct_start=float(self.hparams.pct_start),
-                anneal_strategy="cos",
-                div_factor=float(self.hparams.div_factor),
-                final_div_factor=float(self.hparams.final_div_factor),
-            )
+        scheduler = schedulers[0] if len(schedulers) == 1 else SequentialLR(
+            opt, schedulers=schedulers, milestones=milestones
+        )
 
-        return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step", "frequency": 1}}
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",   # ✅ 按 epoch 更新，避开 step 对齐
+                "frequency": 1,
+                "monitor": None,
+            },
+        }

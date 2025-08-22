@@ -69,15 +69,7 @@ def get_dataloaders(
     df["symbol"] = df["symbol"].astype(str)
     df["period"] = df["period"].astype(str)
 
-    # === 信息输出 ===
-    print("[🔍 symbol unique]", df["symbol"].unique())
-    print("[🔍 period unique]", df["period"].unique())
-    print("[📦 总 group 数]", df.groupby(["symbol", "period"]).ngroups)
-
-    print("\n[⏳ 每个组的时间范围]")
-    for (sym, per), g in df.groupby(["symbol", "period"]):
-        print(f"{sym:10s} {per:3s} ➤ {g['datetime'].min()} ~ {g['datetime'].max()} ({len(g)} 条)")
-
+    
     targets = [
         "target_binarytrend",
         "target_logreturn",
@@ -199,12 +191,6 @@ def get_dataloaders(
         traceback.print_exc()
         raise ValueError("构建 TimeSeriesDataSet 失败")
 
-    print("[📌 训练集 symbol-period 分组时间范围:]")
-    for (sym, per), g in df_train.groupby(["symbol", "period"]):
-        print(f"[train] {sym:10s} {per:3s} ➤ {g['datetime'].min()} ~ {g['datetime'].max()} ({len(g)} 条)")
-    print("[📌 验证集 symbol-period 分组时间范围:]")
-    for (sym, per), g in df_val.groupby(["symbol", "period"]):
-        print(f"[val  ] {sym:10s} {per:3s} ➤ {g['datetime'].min()} ~ {g['datetime'].max()} ({len(g)} 条)")
 
     train_loader = train_ds.to_dataloader(
         train=True,
