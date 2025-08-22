@@ -277,22 +277,19 @@ flwr run . local-simulation \
 1）**最小化仿真**（单机模拟多客户端）
 
 ```bash
-flwr run . local-simulation \
-  --run-config "num-server-rounds=5 local-epochs=1 batch-size=64"
+flwr run . local-simulation --run-config "num-server-rounds=5 local-epochs=1 batch-size=64"
 ```
 
 2）**控制参与率与评估频率**
 
 ```bash
-flwr run . local-simulation \
-  --run-config "num-server-rounds=10 fraction-fit=0.5 fraction-evaluate=0.5 local-epochs=1"
+flwr run . local-simulation --run-config "num-server-rounds=10 fraction-fit=0.5 fraction-evaluate=0.5 local-epochs=1"
 ```
 
 3）**模拟网络特性**（丢包/延迟/带宽）
 
 ```bash
-flwr run . local-simulation \
-  --run-config "num-server-rounds=5 p-drop=0.1 max-latency=200ms bandwidth-limit=50mbps"
+flwr run . local-simulation --run-config "num-server-rounds=5 p-drop=0.1 max-latency=200ms bandwidth-limit=50mbps"
 ```
 
 > 注：具体参数名称与 Flower 版本有关，请以项目内 `pyproject.toml` / 代码为准。
